@@ -25,7 +25,8 @@ endif
 $(info ARCH is set to $(ARCH))
 
 # define the path to lazarus, this is where is it in case of chimaera
-LAZARUS = "/usr/lib/lazarus/2.0.10"
+#LAZARUS = "/usr/lib/lazarus/2.0.10"
+LAZARUS = "/usr/lib/lazarus/2.2.6"
 
 # Define the PATH to include the necessary directories for fpc and fpcres
 CUSTOM_PATH = "/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
