@@ -6,14 +6,22 @@ interface
 
 uses
   SysUtils, Classes, fphttpclient, opensslsockets, LazFileUtils, strutils,
-  FPImage, FPReadJPEG, FPReadPNG, FPReadGIF;
+  FPImage, FPReadJPEG, FPReadPNG, FPReadGIF, XMLRead, DOM;
 
 const
-  BASE_URL = 'https://www.gocomics.com';
+  RSS_BASE_URL = 'https://comiccaster.xyz/rss/';
 
 type
   EInvalidDateError = class(Exception);
   EInvalidEndpointError = class(Exception);
+
+  TComicItem = record
+    Title: string;
+    Link: string;
+    PubDate: TDateTime;
+    ImageUrl: string;
+    Description: string;
+  end;
 
   { TGoComics }
 
@@ -21,244 +29,442 @@ type
   private
     FEndpoint: string;
     FTitle: string;
-    FStartDate: TDateTime;
-    FPrevComicUrl: string;
-    FNextComicUrl: string;
-    FFirstComicUrl: string;
-    FLastComicUrl: string;
-    FPrevComicDate: TDateTime;
-    FNextComicDate: TDateTime;
-    FFirstComicDate: TDateTime;
-    FLastComicDate: TDateTime;
+    FComicItems: array of TComicItem;
+    FCurrentIndex: Integer;
     HTTPClient: TFPHTTPClient;
-    function GetStartDate: TDateTime;
-    function GetTitle: string;
-    function FormatDate(const ADate: TDateTime): string;
-    function ExtractImageUrlFromHtml(const Html: string): string;
-    function ExtractLatestComicUrlFromHtml(const Html: string): string;
-    procedure ExtractNavigationUrlsFromHtml(const Html: string);
+    function GetRSSUrl: string;
+    function FetchRSSFeed: string;
+    function ParseRSSFeed(const RSSContent: string): Boolean;
+    function ExtractImageFromDescription(const Description: string): string;
+    function ExtractImageFromEnclosure(ItemNode: TDOMNode): string;
   public
     constructor Create(const AEndpoint: string);
     destructor Destroy; override;
-    function GetImageUrl(const ADate: TDateTime; out FileName: string; out ContentType: string): TMemoryStream;
-    function GetLatestComicUrl: string;
-    property StartDate: TDateTime read GetStartDate;
-    property Title: string read GetTitle;
-    property PrevComicUrl: string read FPrevComicUrl write FPrevComicUrl;
-    property NextComicUrl: string read FNextComicUrl write FNextComicUrl;
-    property FirstComicUrl: string read FFirstComicUrl write FFirstComicUrl;
-    property LastComicUrl: string read FLastComicUrl write FLastComicUrl;
-    property PrevComicDate: TDateTime read FPrevComicDate;
-    property NextComicDate: TDateTime read FNextComicDate;
-    property FirstComicDate: TDateTime read FFirstComicDate;
-    property LastComicDate: TDateTime read FLastComicDate;
+    function LoadFeed: Boolean;
+    function GetCurrentComic(out FileName: string; out ContentType: string): TMemoryStream;
+    function MoveToPrevious: Boolean;
+    function MoveToNext: Boolean;
+    function GetCurrentImageUrl: string;
+    function GetCurrentDate: TDateTime;
+    function HasPrevious: Boolean;
+    function HasNext: Boolean;
+    property Title: string read FTitle;
+    property Endpoint: string read FEndpoint;
   end;
 
 implementation
 
 { TGoComics }
 
-function TGoComics.ExtractImageUrlFromHtml(const Html: string): string;
-var
-  ImgPos, SrcPos: Integer;
-  ImgTag, SrcUrl: string;
-begin
-  Result := '';
-  ImgPos := Pos('<img', Html);
-  while ImgPos > 0 do
-  begin
-    ImgTag := Copy(Html, ImgPos, PosEx('>', Html, ImgPos) - ImgPos + 1);
-    SrcPos := Pos('src="', ImgTag);
-    if SrcPos > 0 then
-    begin
-      SrcPos := SrcPos + Length('src="');
-      SrcUrl := Copy(ImgTag, SrcPos, PosEx('"', ImgTag, SrcPos) - SrcPos);
-      if Pos('assets.amuniversal.com', SrcUrl) > 0 then
-      begin
-        Result := SrcUrl;
-        Break;
-      end;
-    end;
-    ImgPos := PosEx('<img', Html, ImgPos + Length('<img'));
-  end;
-end;
-
-function TGoComics.ExtractLatestComicUrlFromHtml(const Html: string): string;
-var
-  Pos1, Pos2: Integer;
-begin
-  Pos1 := Pos('<div class="gc-deck gc-deck--cta-0">', Html);
-  if Pos1 > 0 then
-  begin
-    Pos1 := PosEx('<a class="gc-blended-link gc-blended-link--primary"', Html, Pos1);
-    if Pos1 > 0 then
-    begin
-      Pos1 := PosEx('href="', Html, Pos1) + Length('href="');
-      Pos2 := PosEx('"', Html, Pos1);
-      Result := BASE_URL + Copy(Html, Pos1, Pos2 - Pos1);
-    end;
-  end;
-  if Result = '' then
-    raise Exception.Create('Latest comic URL not found.');
-end;
-
-procedure TGoComics.ExtractNavigationUrlsFromHtml(const Html: string);
-var
-  NavPos, LinkPos, ClassPos: Integer;
-  Url, ClassStr: string;
-  YearStr, MonthStr, DayStr: string;
-  Year, Month, Day: Integer;
-begin
-  NavPos := Pos('<nav class="gc-calendar-nav" role="group" aria-label="Date Navigation Controls">', Html);
-  if NavPos > 0 then
-  begin
-    // Reset URLs
-    FFirstComicUrl := '';
-    FPrevComicUrl := '';
-    FNextComicUrl := '';
-    FLastComicUrl := '';
-
-    LinkPos := PosEx('<a role=''button'' href=''', Html, NavPos);
-    while LinkPos > 0 do
-    begin
-      LinkPos := LinkPos + Length('<a role=''button'' href=''''');
-      Url := Copy(Html, LinkPos, PosEx('''', Html, LinkPos) - LinkPos);
-
-      ClassPos := PosEx('class=''fa ', Html, LinkPos);
-      if ClassPos > 0 then
-      begin
-        ClassStr := Copy(Html, ClassPos + Length('class='''), PosEx('''', Html, ClassPos + Length('class=''')) - (ClassPos + Length('class=''')));
-
-        if Pos('fa-backward', ClassStr) > 0 then
-          if Url = ' class=' then begin FFirstComicUrl := '' end else begin FFirstComicUrl := BASE_URL + Url end
-        else if Pos('fa-caret-left', ClassStr) > 0 then
-          if Url = ' class=' then begin FPrevComicUrl := '' end else begin FPrevComicUrl := BASE_URL + Url end
-          //FPrevComicUrl := BASE_URL + Url
-        else if Pos('fa-caret-right', ClassStr) > 0 then
-          if Url = ' class=' then begin FNextComicUrl := '' end else begin FNextComicUrl := BASE_URL + Url end
-          //FNextComicUrl := BASE_URL + Url
-        else if Pos('fa-forward', ClassStr) > 0 then
-          if Url = ' class=' then begin FLastComicUrl := '' end else begin FLastComicUrl := BASE_URL + Url; end
-          //FLastComicUrl := BASE_URL + Url;
-      end;
-
-      LinkPos := PosEx('<a role=''button'' href=''', Html, LinkPos);
-    end;
-
-    // Extract dates for URLs
-    if FFirstComicUrl <> '' then
-    begin
-      YearStr := Copy(FFirstComicUrl, Length(FFirstComicUrl) - 9, 4);
-      MonthStr := Copy(FFirstComicUrl, Length(FFirstComicUrl) - 4, 2);
-      DayStr := Copy(FFirstComicUrl, Length(FFirstComicUrl) - 1, 2);
-      if TryStrToInt(YearStr, Year) and TryStrToInt(MonthStr, Month) and TryStrToInt(DayStr, Day) then
-        FFirstComicDate := EncodeDate(Year, Month, Day);
-    end;
-
-    if FPrevComicUrl <> '' then
-    begin
-      YearStr := Copy(FPrevComicUrl, Length(FPrevComicUrl) - 9, 4);
-      MonthStr := Copy(FPrevComicUrl, Length(FPrevComicUrl) - 4, 2);
-      DayStr := Copy(FPrevComicUrl, Length(FPrevComicUrl) - 1, 2);
-      if TryStrToInt(YearStr, Year) and TryStrToInt(MonthStr, Month) and TryStrToInt(DayStr, Day) then
-        FPrevComicDate := EncodeDate(Year, Month, Day);
-    end;
-
-    if FNextComicUrl <> '' then
-    begin
-      YearStr := Copy(FNextComicUrl, Length(FNextComicUrl) - 9, 4);
-      MonthStr := Copy(FNextComicUrl, Length(FNextComicUrl) - 4, 2);
-      DayStr := Copy(FNextComicUrl, Length(FNextComicUrl) - 1, 2);
-      if TryStrToInt(YearStr, Year) and TryStrToInt(MonthStr, Month) and TryStrToInt(DayStr, Day) then
-        FNextComicDate := EncodeDate(Year, Month, Day);
-    end;
-
-    if FLastComicUrl <> '' then
-    begin
-      YearStr := Copy(FLastComicUrl, Length(FLastComicUrl) - 9, 4);
-      MonthStr := Copy(FLastComicUrl, Length(FLastComicUrl) - 4, 2);
-      DayStr := Copy(FLastComicUrl, Length(FLastComicUrl) - 1, 2);
-      if TryStrToInt(YearStr, Year) and TryStrToInt(MonthStr, Month) and TryStrToInt(DayStr, Day) then
-        FLastComicDate := EncodeDate(Year, Month, Day);
-    end;
-  end;
-end;
-
-function TGoComics.GetStartDate: TDateTime;
-begin
-  Result := FStartDate;
-end;
-
-function TGoComics.GetTitle: string;
-begin
-  Result := FTitle;
-end;
-
-function TGoComics.FormatDate(const ADate: TDateTime): string;
-begin
-  Result := FormatDateTime('yyyy"/"mm"/"dd', ADate);
-end;
-
 constructor TGoComics.Create(const AEndpoint: string);
 begin
   FEndpoint := AEndpoint;
+  FTitle := AEndpoint;
   HTTPClient := TFPHTTPClient.Create(nil);
-
-  // Simulated start date for the comic; this should be replaced with actual data if available
-  FStartDate := EncodeDate(2000, 1, 1);
+  SetLength(FComicItems, 0);
+  FCurrentIndex := -1;
 end;
 
 destructor TGoComics.Destroy;
 begin
   HTTPClient.Free;
+  SetLength(FComicItems, 0);
   inherited Destroy;
 end;
 
-function TGoComics.GetImageUrl(const ADate: TDateTime; out FileName: string; out ContentType: string): TMemoryStream;
-var
-  URL, formattedDate, ComicImg: string;
-  Response: TStringStream;
+function TGoComics.GetRSSUrl: string;
 begin
-  formattedDate := FormatDate(ADate);
-  URL := Format('%s/%s/%s', [BASE_URL, FEndpoint, formattedDate]);
-  Response := TStringStream.Create('');
-  Result := TMemoryStream.Create;
-  try
-    HTTPClient.AllowRedirect := True;
-    HTTPClient.Get(URL, Response); // Get the HTML page
-    ComicImg := ExtractImageUrlFromHtml(Response.DataString); // Extract the image URL from HTML
-
-    if ComicImg = '' then
-      raise Exception.Create('Comic image URL not found in the HTML response.');
-
-    ExtractNavigationUrlsFromHtml(Response.DataString); // Extract navigation URLs
-
-    // Download the comic image
-    HTTPClient.Get(ComicImg, Result); // Get the image directly into the stream
-    Result.Position := 0;
-    ContentType := HTTPClient.ResponseHeaders.Values['Content-Type']; // Extract content type
-    FileName := ExtractFileName(ComicImg); // Use the extracted file name
-  except
-    Result.Free;
-    raise;
-  end;
-  Response.Free;
+  Result := RSS_BASE_URL + FEndpoint;
 end;
 
-function TGoComics.GetLatestComicUrl: string;
+function TGoComics.FetchRSSFeed: string;
 var
-  URL, ResponseStr: string;
   Response: TStringStream;
+  RSSUrl: string;
 begin
-  URL := Format('%s/%s', [BASE_URL, FEndpoint]);
+  Result := '';
+  RSSUrl := GetRSSUrl;
   Response := TStringStream.Create('');
   try
-    HTTPClient.Get(URL, Response);
-    ResponseStr := Response.DataString;
-    Result := ExtractLatestComicUrlFromHtml(ResponseStr);
+    try
+      HTTPClient.AddHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+      WriteLn('Fetching RSS feed from: ', RSSUrl);
+      HTTPClient.Get(RSSUrl, Response);
+      
+      if HTTPClient.ResponseStatusCode = 200 then
+      begin
+        Result := Response.DataString;
+        WriteLn('RSS feed fetched successfully, size: ', Length(Result), ' bytes');
+      end
+      else
+        WriteLn('HTTP error: ', HTTPClient.ResponseStatusCode);
+    except
+      on E: Exception do
+      begin
+        WriteLn('Error fetching RSS feed: ', E.Message);
+        Result := '';
+      end;
+    end;
   finally
     Response.Free;
   end;
+end;
+
+function TGoComics.ExtractImageFromDescription(const Description: string): string;
+var
+  ImgPos, SrcPos, SrcEnd: Integer;
+  DescStr: AnsiString;
+begin
+  Result := '';
+  DescStr := AnsiString(Description);
+  
+  // Look for <img src="..." in description
+  ImgPos := Pos('<img', DescStr);
+  if ImgPos > 0 then
+  begin
+    SrcPos := PosEx('src="', DescStr, ImgPos);
+    if SrcPos > 0 then
+    begin
+      SrcPos := SrcPos + 5; // Skip 'src="'
+      SrcEnd := PosEx('"', DescStr, SrcPos);
+      if SrcEnd > 0 then
+      begin
+        Result := Copy(DescStr, SrcPos, SrcEnd - SrcPos);
+        WriteLn('Extracted image from description: ', Copy(Result, 1, 80), '...');
+        Exit;
+      end;
+    end;
+  end;
+  
+  // Alternative: Look for direct URL in description
+  if Result = '' then
+  begin
+    // Look for https://featureassets.gocomics.com or similar
+    SrcPos := Pos('https://featureassets.gocomics.com', DescStr);
+    if SrcPos <= 0 then
+      SrcPos := Pos('https://assets.amuniversal.com', DescStr);
+    
+    if SrcPos > 0 then
+    begin
+      SrcEnd := SrcPos;
+      // Find end of URL (space, <, or quote)
+      while (SrcEnd <= Length(DescStr)) and 
+            (DescStr[SrcEnd] <> ' ') and 
+            (DescStr[SrcEnd] <> '<') and 
+            (DescStr[SrcEnd] <> '"') and
+            (DescStr[SrcEnd] <> '''') do
+        Inc(SrcEnd);
+      
+      Result := Copy(DescStr, SrcPos, SrcEnd - SrcPos);
+      WriteLn('Extracted direct URL from description: ', Copy(Result, 1, 80), '...');
+    end;
+  end;
+end;
+
+function TGoComics.ExtractImageFromEnclosure(ItemNode: TDOMNode): string;
+var
+  EnclosureNode: TDOMNode;
+  UrlAttr: TDOMNode;
+begin
+  Result := '';
+  
+  // Look for <enclosure url="..." /> tag
+  EnclosureNode := ItemNode.FindNode('enclosure');
+  if Assigned(EnclosureNode) then
+  begin
+    UrlAttr := EnclosureNode.Attributes.GetNamedItem('url');
+    if Assigned(UrlAttr) then
+    begin
+      Result := UrlAttr.NodeValue;
+      WriteLn('Extracted image from enclosure: ', Copy(Result, 1, 80), '...');
+    end;
+  end;
+end;
+
+function TGoComics.ParseRSSFeed(const RSSContent: string): Boolean;
+var
+  Doc: TXMLDocument;
+  RootNode, ChannelNode, ItemNode, ChildNode: TDOMNode;
+  ItemsList: TDOMNodeList;
+  i: Integer;
+  Item: TComicItem;
+  TitleNode, LinkNode, PubDateNode, DescNode: TDOMNode;
+  DateStr: string;
+  StringStream: TStringStream;
+begin
+  Result := False;
+  SetLength(FComicItems, 0);
+  
+  if RSSContent = '' then
+  begin
+    WriteLn('RSS content is empty');
+    Exit;
+  end;
+  
+  StringStream := TStringStream.Create(RSSContent);
+  try
+    try
+      WriteLn('Parsing RSS XML...');
+      ReadXMLFile(Doc, StringStream);
+      
+      try
+        RootNode := Doc.DocumentElement;
+        if not Assigned(RootNode) then
+        begin
+          WriteLn('No root node in XML');
+          Exit;
+        end;
+        
+        WriteLn('Root node: ', RootNode.NodeName);
+        
+        // Find channel node
+        ChannelNode := RootNode.FindNode('channel');
+        if not Assigned(ChannelNode) then
+        begin
+          WriteLn('No channel node found');
+          Exit;
+        end;
+        
+        WriteLn('Found channel node');
+        
+        // Get channel title
+        TitleNode := ChannelNode.FindNode('title');
+        if Assigned(TitleNode) and Assigned(TitleNode.FirstChild) then
+        begin
+          FTitle := TitleNode.FirstChild.NodeValue;
+          WriteLn('Feed title: ', FTitle);
+        end;
+        
+        // Get all item nodes
+        ItemsList := ChannelNode.GetChildNodes;
+        WriteLn('Total child nodes in channel: ', ItemsList.Count);
+        
+        for i := 0 to ItemsList.Count - 1 do
+        begin
+          ItemNode := ItemsList.Item[i];
+          if ItemNode.NodeName = 'item' then
+          begin
+            WriteLn('Processing item ', i);
+            
+            // Initialize item
+            Item.Title := '';
+            Item.Link := '';
+            Item.PubDate := 0;
+            Item.ImageUrl := '';
+            Item.Description := '';
+            
+            // Extract title
+            TitleNode := ItemNode.FindNode('title');
+            if Assigned(TitleNode) and Assigned(TitleNode.FirstChild) then
+              Item.Title := TitleNode.FirstChild.NodeValue;
+            
+            // Extract link
+            LinkNode := ItemNode.FindNode('link');
+            if Assigned(LinkNode) and Assigned(LinkNode.FirstChild) then
+              Item.Link := LinkNode.FirstChild.NodeValue;
+            
+            // Extract pubDate
+            PubDateNode := ItemNode.FindNode('pubDate');
+            if Assigned(PubDateNode) and Assigned(PubDateNode.FirstChild) then
+            begin
+              DateStr := PubDateNode.FirstChild.NodeValue;
+              // Try to parse RFC822 date format
+              // Example: "Wed, 08 Jan 2026 05:00:00 +0000"
+              try
+                // Simple date extraction - get the date parts
+                // Format: Day, DD Mon YYYY HH:MM:SS +ZZZZ
+                Item.PubDate := Now; // Fallback to now
+                // TODO: Implement proper RFC822 date parsing if needed
+                WriteLn('PubDate: ', DateStr);
+              except
+                Item.PubDate := Now;
+              end;
+            end;
+            
+            // Extract description
+            DescNode := ItemNode.FindNode('description');
+            if Assigned(DescNode) and Assigned(DescNode.FirstChild) then
+            begin
+              Item.Description := DescNode.FirstChild.NodeValue;
+              // Try to extract image from description
+              Item.ImageUrl := ExtractImageFromDescription(Item.Description);
+            end;
+            
+            // Try enclosure if no image in description
+            if Item.ImageUrl = '' then
+              Item.ImageUrl := ExtractImageFromEnclosure(ItemNode);
+            
+            WriteLn('Item: ', Item.Title, ' | Image: ', Copy(Item.ImageUrl, 1, 50));
+            
+            // Add to array if we have an image URL
+            if Item.ImageUrl <> '' then
+            begin
+              SetLength(FComicItems, Length(FComicItems) + 1);
+              FComicItems[High(FComicItems)] := Item;
+            end;
+          end;
+        end;
+        
+        WriteLn('Total comics loaded: ', Length(FComicItems));
+        
+        if Length(FComicItems) > 0 then
+        begin
+          FCurrentIndex := 0; // Start with first (most recent) comic
+          Result := True;
+        end;
+        
+      finally
+        Doc.Free;
+      end;
+      
+    except
+      on E: Exception do
+      begin
+        WriteLn('Error parsing RSS: ', E.Message);
+        Result := False;
+      end;
+    end;
+  finally
+    StringStream.Free;
+  end;
+end;
+
+function TGoComics.LoadFeed: Boolean;
+var
+  RSSContent: string;
+begin
+  RSSContent := FetchRSSFeed;
+  Result := ParseRSSFeed(RSSContent);
+end;
+
+function TGoComics.GetCurrentComic(out FileName: string; out ContentType: string): TMemoryStream;
+var
+  ImageUrl: string;
+  TempClient: TFPHTTPClient;
+begin
+  Result := nil;
+  
+  if (FCurrentIndex < 0) or (FCurrentIndex >= Length(FComicItems)) then
+  begin
+    WriteLn('Invalid current index: ', FCurrentIndex);
+    Exit;
+  end;
+  
+  ImageUrl := FComicItems[FCurrentIndex].ImageUrl;
+  if ImageUrl = '' then
+  begin
+    WriteLn('No image URL for current comic');
+    Exit;
+  end;
+  
+  Result := TMemoryStream.Create;
+  TempClient := TFPHTTPClient.Create(nil);
+  
+  try
+    try
+      TempClient.AddHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
+      WriteLn('Downloading image from: ', ImageUrl);
+      TempClient.Get(ImageUrl, Result);
+      
+      if TempClient.ResponseStatusCode = 200 then
+      begin
+        Result.Position := 0;
+        ContentType := TempClient.ResponseHeaders.Values['Content-Type'];
+        
+        // If no Content-Type, guess from URL/data
+        if ContentType = '' then
+        begin
+          WriteLn('WARNING: No Content-Type header, guessing from data');
+          // Check magic numbers in the file
+          Result.Position := 0;
+          if Result.Size >= 4 then
+          begin
+            if (Result.ReadByte = $FF) and (Result.ReadByte = $D8) then
+              ContentType := 'image/jpeg'
+            else
+            begin
+              Result.Position := 0;
+              if (Result.ReadByte = $89) and (Result.ReadByte = $50) and 
+                 (Result.ReadByte = $4E) and (Result.ReadByte = $47) then
+                ContentType := 'image/png'
+              else
+                ContentType := 'image/jpeg'; // Default fallback
+            end;
+          end
+          else
+            ContentType := 'image/jpeg'; // Default fallback
+          Result.Position := 0;
+        end;
+        
+        FileName := ExtractFileName(ImageUrl);
+        WriteLn('Image downloaded successfully, size: ', Result.Size, ' bytes');
+        WriteLn('Content-Type: ', ContentType);
+        WriteLn('FileName: ', FileName);
+      end
+      else
+      begin
+        WriteLn('HTTP error downloading image: ', TempClient.ResponseStatusCode);
+        FreeAndNil(Result);
+      end;
+      
+    except
+      on E: Exception do
+      begin
+        WriteLn('Error downloading image: ', E.Message);
+        FreeAndNil(Result);
+      end;
+    end;
+  finally
+    TempClient.Free;
+  end;
+end;
+
+function TGoComics.MoveToPrevious: Boolean;
+begin
+  Result := False;
+  if HasPrevious then
+  begin
+    Inc(FCurrentIndex); // RSS items are in reverse chronological order
+    Result := True;
+    WriteLn('Moved to previous comic, index: ', FCurrentIndex);
+  end;
+end;
+
+function TGoComics.MoveToNext: Boolean;
+begin
+  Result := False;
+  if HasNext then
+  begin
+    Dec(FCurrentIndex); // RSS items are in reverse chronological order
+    Result := True;
+    WriteLn('Moved to next comic, index: ', FCurrentIndex);
+  end;
+end;
+
+function TGoComics.GetCurrentImageUrl: string;
+begin
+  Result := '';
+  if (FCurrentIndex >= 0) and (FCurrentIndex < Length(FComicItems)) then
+    Result := FComicItems[FCurrentIndex].ImageUrl;
+end;
+
+function TGoComics.GetCurrentDate: TDateTime;
+begin
+  Result := 0;
+  if (FCurrentIndex >= 0) and (FCurrentIndex < Length(FComicItems)) then
+    Result := FComicItems[FCurrentIndex].PubDate;
+end;
+
+function TGoComics.HasPrevious: Boolean;
+begin
+  // Previous = older comic = higher index
+  Result := (FCurrentIndex >= 0) and (FCurrentIndex < Length(FComicItems) - 1);
+end;
+
+function TGoComics.HasNext: Boolean;
+begin
+  // Next = newer comic = lower index
+  Result := (FCurrentIndex > 0);
 end;
 
 initialization
@@ -267,4 +473,3 @@ initialization
   ImageHandlers.RegisterImageReader('GIF Image', 'gif', TFPReaderGIF);
 
 end.
-
