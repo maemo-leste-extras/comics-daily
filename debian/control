@@ -1,18 +1,39 @@
 Source: comics-daily
-Section: user/graphics
+Section: graphics
 Priority: optional
 Maintainer: norayr chilingarian <norayr@arnet.am>
-Uploaders: norayr chilnigarian <norayr@arnet.am>
-Build-Depends:  debhelper (>= 4.0.0), fpc, fp-utils, fp-units-rtl, fp-units-net, fp-units-multimedia, fp-units-misc, fp-units-math, fp-units-gtk2, fp-units-gfx, fp-units-fv, fp-units-fcl, fp-units-db, fp-units-base, fp-compiler, fpc-source, lazarus-ide, lazarus-ide-gtk2, lazarus-src,lcl, lcl-gtk2, lcl-nogui, lcl-units, lcl-gtk2, lcl-nogui, lcl-units
-Standards-Version: 3.6.1
+Build-Depends:
+ debhelper-compat (= 13),
+ fpc,
+ fp-utils,
+ fp-units-base,
+ fp-units-db,
+ fp-units-fcl,
+ fp-units-fv,
+ fp-units-gfx,
+ fp-units-gtk2,
+ fp-units-math,
+ fp-units-misc,
+ fp-units-multimedia,
+ fp-units-net,
+ fp-units-rtl,
+ fp-compiler,
+ fpc-source,
+ lazarus,
+ lcl,
+ lcl-gtk2
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
 
 Package: comics-daily
-Section: user/graphics
+Section: graphics
 Architecture: any
-Depends: libc6, libgtk2.0-0, libx11-6, libgdk-pixbuf-2.0-0, libgtk2.0-0, libglib2.0-0, libpango-1.0-0, libcairo2, libatk1.0-0, libpangocairo-1.0-0, libfontconfig1, libxrender1, libxinerama1, libxi6, libxrandr2, libxcursor1, libxcomposite1, libxdamage1, libxfixes3, libxext6, libxcb1, libpangoft2-1.0-0, libffi7, libpcre3, libfribidi0, libthai0, libharfbuzz0b, libpixman-1-0, libfreetype6, libpng16-16, libxcb-shm0, libxcb-render0, zlib1g, libexpat1, libxau6, libxdmcp6
-Provides: comics-daily
-Replaces: comics-daily
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+ libssl-dev
 Description: web comic reader
+ A web comic reader written in Free Pascal / Lazarus.
 XSBC-Bugtracker: mailto:norayr@arnet.am
 XB-Maemo-Icon-26:
  iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAO0ElEQVRo3s1a
