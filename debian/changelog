@@ -1,3 +1,9 @@
+comics-daily (0.8.2+leste1)  unstable; urgency=low
+
+  * fixed section in debian/control
+
+ -- norayr chilingarian <norayr@arnet.am>  Mon, 24 Apr 2026 14:50:00 +0400
+
 comics-daily (0.8.1+leste1)  unstable; urgency=low
 
   * excalibur build.
