@@ -1,5 +1,5 @@
 Source: comics-daily
-Section: graphics
+Section: user/graphics
 Priority: optional
 Maintainer: norayr chilingarian <norayr@arnet.am>
 Build-Depends:
